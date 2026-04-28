@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# claude-switch — switch between Claude profiles (Code + Desktop together).
+#
+# Usage:
+#   claude-switch                    list profiles, mark active
+#   claude-switch <profile>          switch to <profile>
+#   claude-switch init <profile>     move existing Claude state into a new profile (run once)
+#   claude-switch add <profile>      create empty profile (login required after switch)
+#   claude-switch remove <profile>   delete profile (data + keychain backups)
+#   claude-switch current            print active profile
+#
+# Layout per profile:
+#   ~/.claude-profiles/<profile>/code/      ← symlinked to ~/.claude
+#   ~/.claude-profiles/<profile>/desktop/   ← symlinked to ~/Library/Application Support/Claude
+#   Keychain backups: "Claude Code-credentials-profile-<name>",
+#                     "Claude Safe Storage-profile-<name>"
+
+set -euo pipefail
+
+PROFILES_DIR="$HOME/.claude-profiles"
+ACTIVE_FILE="$PROFILES_DIR/.active"
+
+CODE_LINK="$HOME/.claude"
+DESKTOP_LINK="$HOME/Library/Application Support/Claude"
+
+KC_CODE_LIVE="Claude Code-credentials"
+KC_CODE_BACKUP_PREFIX="Claude Code-credentials-profile-"
+KC_DESKTOP_LIVE="Claude Safe Storage"
+KC_DESKTOP_BACKUP_PREFIX="Claude Safe Storage-profile-"
+
+c_red()    { printf '\033[31m%s\033[0m\n' "$*"; }
+c_green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+c_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+c_bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
+
+die() { c_red "Error: $*" >&2; exit 1; }
+
+require_macos() {
+    [[ "$(uname -s)" == "Darwin" ]] || die "claude-switch requires macOS."
+}
+
+check_desktop_running() {
+    if pgrep -x "Claude" >/dev/null 2>&1; then
+        die "Claude Desktop is running. Quit it (Cmd+Q) before switching."
+    fi
+}
+
+profile_dir()         { echo "$PROFILES_DIR/$1"; }
+profile_code_dir()    { echo "$PROFILES_DIR/$1/code"; }
+profile_desktop_dir() { echo "$PROFILES_DIR/$1/desktop"; }
+
+current_profile() {
+    [[ -f "$ACTIVE_FILE" ]] && cat "$ACTIVE_FILE" || echo ""
+}
+
+set_active() { echo "$1" > "$ACTIVE_FILE"; }
+
+# ---- Keychain helpers (generic) ----
+
+kc_backup() {
+    local live_service="$1" backup_service="$2" account="$3" cred
+    cred=$(security find-generic-password -s "$live_service" -w 2>/dev/null) || return 0
+    security delete-generic-password -s "$backup_service" >/dev/null 2>&1 || true
+    security add-generic-password -s "$backup_service" -a "$account" -w "$cred"
+}
+
+kc_restore() {
+    local live_service="$1" backup_service="$2" account="$3" cred
+    if cred=$(security find-generic-password -s "$backup_service" -w 2>/dev/null); then
+        security delete-generic-password -s "$live_service" >/dev/null 2>&1 || true
+        security add-generic-password -s "$live_service" -a "$account" -w "$cred"
+        return 0
+    fi
+    security delete-generic-password -s "$live_service" >/dev/null 2>&1 || true
+    return 1
+}
+
+backup_kc_for() {
+    local profile="$1"
+    kc_backup "$KC_CODE_LIVE"    "${KC_CODE_BACKUP_PREFIX}${profile}"    "$profile"
+    kc_backup "$KC_DESKTOP_LIVE" "${KC_DESKTOP_BACKUP_PREFIX}${profile}" "$profile"
+}
+
+restore_kc_for() {
+    local profile="$1" code_ok=0 desktop_ok=0
+    kc_restore "$KC_CODE_LIVE"    "${KC_CODE_BACKUP_PREFIX}${profile}"    "$profile" && code_ok=1 || true
+    kc_restore "$KC_DESKTOP_LIVE" "${KC_DESKTOP_BACKUP_PREFIX}${profile}" "$profile" && desktop_ok=1 || true
+    echo "$code_ok $desktop_ok"
+}
+
+# ---- Symlink swap ----
+
+swap_link() {
+    local link="$1" target="$2"
+    if [[ -L "$link" ]]; then
+        rm "$link"
+    elif [[ -e "$link" ]]; then
+        die "$link is a real path, not a symlink. Run: claude-switch init <name> first."
+    fi
+    ln -s "$target" "$link"
+}
+
+# ---- Commands ----
+
+list_profiles() {
+    [[ -d "$PROFILES_DIR" ]] || { echo "(no profiles)"; return; }
+    local current any=0
+    current=$(current_profile)
+    for d in "$PROFILES_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        any=1
+        local name; name=$(basename "$d")
+        if [[ "$name" == "$current" ]]; then
+            c_green "* $name (active)"
+        else
+            echo "  $name"
+        fi
+    done
+    [[ $any -eq 1 ]] || echo "(none — run: claude-switch init <name>)"
+}
+
+cmd_init() {
+    local profile="${1:-}"
+    [[ -n "$profile" ]] || die "Usage: claude-switch init <profile>"
+    check_desktop_running
+
+    local pdir code_target desktop_target
+    pdir=$(profile_dir "$profile")
+    code_target=$(profile_code_dir "$profile")
+    desktop_target=$(profile_desktop_dir "$profile")
+    [[ ! -e "$pdir" ]] || die "Profile '$profile' already exists"
+
+    [[ ! -L "$CODE_LINK" ]]    || die "$CODE_LINK is already a symlink. init was already run."
+    [[ ! -L "$DESKTOP_LINK" ]] || die "$DESKTOP_LINK is already a symlink. init was already run."
+
+    mkdir -p "$pdir"
+    chmod 700 "$PROFILES_DIR" "$pdir"
+
+    if [[ -d "$CODE_LINK" ]]; then
+        c_yellow "Moving $CODE_LINK → $code_target"
+        mv "$CODE_LINK" "$code_target"
+    else
+        c_yellow "$CODE_LINK not found — creating empty"
+        mkdir -p "$code_target"
+    fi
+    ln -s "$code_target" "$CODE_LINK"
+
+    if [[ -d "$DESKTOP_LINK" ]]; then
+        c_yellow "Moving $DESKTOP_LINK → $desktop_target"
+        mv "$DESKTOP_LINK" "$desktop_target"
+    else
+        c_yellow "$DESKTOP_LINK not found — creating empty (Desktop will populate on launch)"
+        mkdir -p "$desktop_target"
+    fi
+    ln -s "$desktop_target" "$DESKTOP_LINK"
+
+    backup_kc_for "$profile"
+    set_active "$profile"
+    c_green "Initialized '$profile' as active profile."
+    echo "Next: claude-switch add <other> ; claude-switch <other> ; log in to Code + Desktop."
+}
+
+cmd_add() {
+    local profile="${1:-}"
+    [[ -n "$profile" ]] || die "Usage: claude-switch add <profile>"
+    local pdir; pdir=$(profile_dir "$profile")
+    [[ ! -e "$pdir" ]] || die "Profile '$profile' already exists"
+    mkdir -p "$(profile_code_dir "$profile")" "$(profile_desktop_dir "$profile")"
+    chmod 700 "$pdir"
+    c_green "Created empty profile '$profile'. Switch to it, then log in to Code + Desktop."
+}
+
+cmd_remove() {
+    local profile="${1:-}"
+    [[ -n "$profile" ]] || die "Usage: claude-switch remove <profile>"
+    local pdir; pdir=$(profile_dir "$profile")
+    [[ -d "$pdir" ]] || die "Profile '$profile' not found"
+    [[ "$(current_profile)" != "$profile" ]] || die "Cannot remove active profile. Switch away first."
+    c_yellow "About to permanently delete: $pdir"
+    read -rp "Type the profile name '$profile' to confirm: " confirm
+    [[ "$confirm" == "$profile" ]] || die "Cancelled."
+    rm -rf "$pdir"
+    security delete-generic-password -s "${KC_CODE_BACKUP_PREFIX}${profile}"    >/dev/null 2>&1 || true
+    security delete-generic-password -s "${KC_DESKTOP_BACKUP_PREFIX}${profile}" >/dev/null 2>&1 || true
+    c_green "Removed '$profile'"
+}
+
+cmd_switch() {
+    local target_profile="$1"
+    local pdir; pdir=$(profile_dir "$target_profile")
+    [[ -d "$pdir" ]] || die "Profile '$target_profile' not found. Run: claude-switch list"
+
+    check_desktop_running
+
+    local current; current=$(current_profile)
+    if [[ "$current" == "$target_profile" ]]; then
+        c_green "Already on '$target_profile'."
+        return 0
+    fi
+
+    [[ -n "$current" ]] && backup_kc_for "$current"
+
+    swap_link "$CODE_LINK"    "$(profile_code_dir    "$target_profile")"
+    swap_link "$DESKTOP_LINK" "$(profile_desktop_dir "$target_profile")"
+
+    local res; res=$(restore_kc_for "$target_profile")
+    local code_ok desktop_ok
+    code_ok=${res% *}; desktop_ok=${res#* }
+
+    set_active "$target_profile"
+
+    c_green "Switched to '$target_profile'."
+    [[ "$code_ok" -eq 1 ]]    || c_yellow "  Code: no saved credential — run 'claude' to log in."
+    [[ "$desktop_ok" -eq 1 ]] || c_yellow "  Desktop: no saved credential — open Claude.app to log in."
+}
+
+main() {
+    require_macos
+    local cmd="${1:-}"
+    case "$cmd" in
+        ""|list|ls)
+            c_bold "Current: $(current_profile || echo "(none)")"
+            echo
+            c_bold "Profiles:"
+            list_profiles
+            ;;
+        current)   current_profile ;;
+        init)      cmd_init   "${2:-}" ;;
+        add)       cmd_add    "${2:-}" ;;
+        remove|rm) cmd_remove "${2:-}" ;;
+        -h|--help|help)
+            sed -n '2,18p' "$0"
+            ;;
+        *) cmd_switch "$cmd" ;;
+    esac
+}
+
+main "$@"
