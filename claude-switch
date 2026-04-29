@@ -56,35 +56,54 @@ current_profile() {
 set_active() { echo "$1" > "$ACTIVE_FILE"; }
 
 # ---- Keychain helpers (generic) ----
+#
+# Claude Code/Desktop store credentials with a service-specific account
+# (e.g. acct=<username>) and look the entry up by (svce, acct). We must
+# preserve the original acct when shuttling between live and backup, or
+# the host app can't find its credential and prompts to log in again.
+
+kc_account_of() {
+    # Print the acct attribute of the first matching entry, or empty.
+    security find-generic-password -s "$1" 2>/dev/null \
+        | awk -F'"' '/"acct"<blob>=/ { print $4; exit }'
+}
+
+kc_delete_all() {
+    # `security delete-generic-password -s` removes one entry per call;
+    # loop so duplicates can't survive a restore.
+    while security delete-generic-password -s "$1" >/dev/null 2>&1; do :; done
+}
 
 kc_backup() {
-    local live_service="$1" backup_service="$2" account="$3" cred
+    local live_service="$1" backup_service="$2" cred acct
     cred=$(security find-generic-password -s "$live_service" -w 2>/dev/null) || return 0
-    security delete-generic-password -s "$backup_service" >/dev/null 2>&1 || true
-    security add-generic-password -s "$backup_service" -a "$account" -w "$cred"
+    acct=$(kc_account_of "$live_service")
+    kc_delete_all "$backup_service"
+    security add-generic-password -s "$backup_service" -a "$acct" -w "$cred"
 }
 
 kc_restore() {
-    local live_service="$1" backup_service="$2" account="$3" cred
+    local live_service="$1" backup_service="$2" cred acct
     if cred=$(security find-generic-password -s "$backup_service" -w 2>/dev/null); then
-        security delete-generic-password -s "$live_service" >/dev/null 2>&1 || true
-        security add-generic-password -s "$live_service" -a "$account" -w "$cred"
+        acct=$(kc_account_of "$backup_service")
+        kc_delete_all "$live_service"
+        security add-generic-password -s "$live_service" -a "$acct" -w "$cred"
         return 0
     fi
-    security delete-generic-password -s "$live_service" >/dev/null 2>&1 || true
+    kc_delete_all "$live_service"
     return 1
 }
 
 backup_kc_for() {
     local profile="$1"
-    kc_backup "$KC_CODE_LIVE"    "${KC_CODE_BACKUP_PREFIX}${profile}"    "$profile"
-    kc_backup "$KC_DESKTOP_LIVE" "${KC_DESKTOP_BACKUP_PREFIX}${profile}" "$profile"
+    kc_backup "$KC_CODE_LIVE"    "${KC_CODE_BACKUP_PREFIX}${profile}"
+    kc_backup "$KC_DESKTOP_LIVE" "${KC_DESKTOP_BACKUP_PREFIX}${profile}"
 }
 
 restore_kc_for() {
     local profile="$1" code_ok=0 desktop_ok=0
-    kc_restore "$KC_CODE_LIVE"    "${KC_CODE_BACKUP_PREFIX}${profile}"    "$profile" && code_ok=1 || true
-    kc_restore "$KC_DESKTOP_LIVE" "${KC_DESKTOP_BACKUP_PREFIX}${profile}" "$profile" && desktop_ok=1 || true
+    kc_restore "$KC_CODE_LIVE"    "${KC_CODE_BACKUP_PREFIX}${profile}"    && code_ok=1 || true
+    kc_restore "$KC_DESKTOP_LIVE" "${KC_DESKTOP_BACKUP_PREFIX}${profile}" && desktop_ok=1 || true
     echo "$code_ok $desktop_ok"
 }
 
