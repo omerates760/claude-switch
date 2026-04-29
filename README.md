@@ -14,6 +14,7 @@ Other account switchers swap only the credential, leaving conversation history, 
 - Sessions, tasks, plans, memory
 - Settings (`settings.json`, `settings.local.json`)
 - MCP server configs and OAuth state
+- Cached account identity (`~/.claude.json` — email, organization, OAuth account)
 - Claude Desktop cookies, IndexedDB, local storage
 - Keychain credentials (backed up per profile)
 
@@ -79,13 +80,16 @@ claude-switch            # show current + list profiles
 ├── .active                    # active profile name
 ├── work/
 │   ├── code/                  # ←  ~/.claude  symlink target
-│   └── desktop/               # ←  ~/Library/Application Support/Claude  symlink target
+│   ├── desktop/               # ←  ~/Library/Application Support/Claude  symlink target
+│   └── claude.json            # ←  ~/.claude.json  symlink target (Code identity cache)
 └── personal/
     ├── code/
-    └── desktop/
+    ├── desktop/
+    └── claude.json
 
 ~/.claude                                   → symlink to active profile's code/
 ~/Library/Application Support/Claude        → symlink to active profile's desktop/
+~/.claude.json                              → symlink to active profile's claude.json
 ```
 
 Keychain items per profile:
@@ -96,7 +100,7 @@ Keychain items per profile:
 When you switch:
 
 1. The current profile's live Keychain credentials are backed up to its `*-profile-*` items.
-2. The `~/.claude` and `~/Library/Application Support/Claude` symlinks are repointed.
+2. The `~/.claude`, `~/Library/Application Support/Claude`, and `~/.claude.json` symlinks are repointed.
 3. The target profile's Keychain backups are restored to the live Keychain items.
 4. The active profile name is written to `~/.claude-profiles/.active`.
 
@@ -127,6 +131,9 @@ mv ~/.claude-profiles/$ACTIVE/code ~/.claude
 
 rm "$HOME/Library/Application Support/Claude"
 mv ~/.claude-profiles/$ACTIVE/desktop "$HOME/Library/Application Support/Claude"
+
+rm ~/.claude.json
+[ -f ~/.claude-profiles/$ACTIVE/claude.json ] && mv ~/.claude-profiles/$ACTIVE/claude.json ~/.claude.json
 
 # Remove the script and remaining profile data
 rm /opt/homebrew/bin/claude-switch    # or /usr/local/bin/claude-switch

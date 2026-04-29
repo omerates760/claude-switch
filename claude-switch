@@ -10,8 +10,9 @@
 #   claude-switch current            print active profile
 #
 # Layout per profile:
-#   ~/.claude-profiles/<profile>/code/      ← symlinked to ~/.claude
-#   ~/.claude-profiles/<profile>/desktop/   ← symlinked to ~/Library/Application Support/Claude
+#   ~/.claude-profiles/<profile>/code/         ← symlinked to ~/.claude
+#   ~/.claude-profiles/<profile>/desktop/      ← symlinked to ~/Library/Application Support/Claude
+#   ~/.claude-profiles/<profile>/claude.json   ← symlinked to ~/.claude.json (Code identity cache)
 #   Keychain backups: "Claude Code-credentials-profile-<name>",
 #                     "Claude Safe Storage-profile-<name>"
 
@@ -22,6 +23,7 @@ ACTIVE_FILE="$PROFILES_DIR/.active"
 
 CODE_LINK="$HOME/.claude"
 DESKTOP_LINK="$HOME/Library/Application Support/Claude"
+JSON_LINK="$HOME/.claude.json"
 
 KC_CODE_LIVE="Claude Code-credentials"
 KC_CODE_BACKUP_PREFIX="Claude Code-credentials-profile-"
@@ -48,6 +50,7 @@ check_desktop_running() {
 profile_dir()         { echo "$PROFILES_DIR/$1"; }
 profile_code_dir()    { echo "$PROFILES_DIR/$1/code"; }
 profile_desktop_dir() { echo "$PROFILES_DIR/$1/desktop"; }
+profile_json_file()   { echo "$PROFILES_DIR/$1/claude.json"; }
 
 current_profile() {
     [[ -f "$ACTIVE_FILE" ]] && cat "$ACTIVE_FILE" || echo ""
@@ -143,14 +146,16 @@ cmd_init() {
     [[ -n "$profile" ]] || die "Usage: claude-switch init <profile>"
     check_desktop_running
 
-    local pdir code_target desktop_target
+    local pdir code_target desktop_target json_target
     pdir=$(profile_dir "$profile")
     code_target=$(profile_code_dir "$profile")
     desktop_target=$(profile_desktop_dir "$profile")
+    json_target=$(profile_json_file "$profile")
     [[ ! -e "$pdir" ]] || die "Profile '$profile' already exists"
 
     [[ ! -L "$CODE_LINK" ]]    || die "$CODE_LINK is already a symlink. init was already run."
     [[ ! -L "$DESKTOP_LINK" ]] || die "$DESKTOP_LINK is already a symlink. init was already run."
+    [[ ! -L "$JSON_LINK" ]]    || die "$JSON_LINK is already a symlink. init was already run."
 
     mkdir -p "$pdir"
     chmod 700 "$PROFILES_DIR" "$pdir"
@@ -172,6 +177,14 @@ cmd_init() {
         mkdir -p "$desktop_target"
     fi
     ln -s "$desktop_target" "$DESKTOP_LINK"
+
+    if [[ -f "$JSON_LINK" ]]; then
+        c_yellow "Moving $JSON_LINK → $json_target"
+        mv "$JSON_LINK" "$json_target"
+    else
+        c_yellow "$JSON_LINK not found — Code will create on first login"
+    fi
+    ln -s "$json_target" "$JSON_LINK"
 
     backup_kc_for "$profile"
     set_active "$profile"
@@ -219,8 +232,21 @@ cmd_switch() {
 
     [[ -n "$current" ]] && backup_kc_for "$current"
 
+    # One-time migration: pre-fix versions did not manage ~/.claude.json, so it
+    # may exist as a real file. Move it into the departing profile to preserve
+    # that account's cached identity (email/org) before repointing the symlink.
+    if [[ -e "$JSON_LINK" && ! -L "$JSON_LINK" ]]; then
+        if [[ -n "$current" ]]; then
+            c_yellow "Migrating $JSON_LINK → $(profile_json_file "$current") (one-time)"
+            mv "$JSON_LINK" "$(profile_json_file "$current")"
+        else
+            die "$JSON_LINK is a real file but no active profile is set. Run: claude-switch init <name>."
+        fi
+    fi
+
     swap_link "$CODE_LINK"    "$(profile_code_dir    "$target_profile")"
     swap_link "$DESKTOP_LINK" "$(profile_desktop_dir "$target_profile")"
+    swap_link "$JSON_LINK"    "$(profile_json_file   "$target_profile")"
 
     local res; res=$(restore_kc_for "$target_profile")
     local code_ok desktop_ok
