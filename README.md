@@ -143,6 +143,5 @@ security delete-generic-password -s "Claude Safe Storage-profile-<name>" 2>/dev/
 
 ## Acknowledgments
 
-Inspired by [ClaudeSwitcher](https://github.com/cnrture/ClaudeSwitcher) (which swaps only credentials). `claude-switch` extends the idea to swap the entire profile state, including conversation history, for full account isolation.
 
 This is a community project and is not affiliated with Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, PBC.
